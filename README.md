@@ -1,66 +1,17 @@
 # agent2agent
 
-Decentralized agent-to-agent communication. Agents publish results and wait for each other — no broker, no cloud, no orchestrator required.
+Decentralized agent-to-agent communication for parallel Claude agents. No broker, no cloud, no orchestrator.
 
 ```
-Agent A  →  agent_publish(name="researcher", result="…")
-Agent B  →  agent_wait(name="researcher")   # blocks until A is done, then returns A's result
-```
-
-Works on a single laptop out of the box. Scales to remote teams by swapping the backend.
-
----
-
-## Why this exists
-
-The default way developers work with agents today is **parallel** — multiple Claude Code sessions open at once, sub-agents spawned mid-task, background jobs running alongside foreground work. But those agents have no way to talk to each other. If Agent B's work depends on Agent A's output, your options are:
-
-- Serialize everything (kills the parallelism benefit), or
-- Copy-paste results manually between sessions, or
-- Build your own ad-hoc coordination layer every time.
-
-agent2agent is that coordination layer, kept deliberately minimal. Five tools:
-
-| Tool | What it does |
-|------|-------------|
-| `agent_start(name, task)` | Announce that you're running |
-| `agent_publish(name, result)` | Broadcast your output |
-| `agent_wait(name, timeout)` | Block until another agent publishes |
-| `agent_status()` | See all agents and their states |
-| `agent_clear(name)` | Reset a slot for reuse |
-
----
-
-## vs. Google's Agent2Agent (A2A) protocol
-
-Google's [A2A protocol](https://google.github.io/A2A/) solves a different problem: **how do remote agent services discover and call each other over HTTP**. It's designed for enterprise environments where agents run as separate hosted services behind auth layers.
-
-agent2agent solves the problem A2A explicitly doesn't cover: **agents already running on the same machine (or sharing a backend) that need to hand off results**.
-
-| | agent2agent | Google A2A |
-|--|-------------|------------|
-| **Model** | Shared state (publish/wait) | RPC (request/response) |
-| **Transport** | SQLite, Postgres, or email | HTTPS + JSON-RPC |
-| **Setup** | `uvx agent2agent` | Run agent servers + service discovery |
-| **Blocking wait** | `agent_wait()` ✓ | Async callbacks only |
-| **Works offline** | ✓ | ✗ |
-| **Decentralized** | ✓ (no broker) | ✗ (requires agent card registry) |
-| **Lines of code** | ~200 | — |
-
-The key distinction: A2A assumes agents are **remote services**. agent2agent assumes agents are **parallel processes** that share a medium — whether that's a local file, a database, or a mailbox.
-
----
-
-## Step-by-step: parallel Claude CLI agents
-
-The common case — you have multiple `claude` sessions open and want them to hand off results.
-
-**1. Install once, globally:**
-```bash
 pip install agent2agent
 ```
 
-**2. Add to `~/.claude/settings.json`:**
+---
+
+## Setup (one-time)
+
+Add to `~/.claude/settings.json`:
+
 ```json
 {
   "mcpServers": {
@@ -71,153 +22,155 @@ pip install agent2agent
 }
 ```
 
-**3. Open two terminal panes (tmux, iTerm, whatever).**
-
-**4. In pane 1 — the producer agent:**
-```
-agent_start(name="researcher", task="scraping competitor prices")
-... do your work ...
-agent_publish(name="researcher", result="<your output here>")
-```
-
-**5. In pane 2 — the consumer agent** (can start before or after pane 1):
-```
-agent_wait(name="researcher")   ← blocks here until pane 1 publishes
-... use the result ...
-```
-
-**6. Check on both from anywhere:**
-```
-agent_status()
-```
-
-That's it. No server to start, no config beyond step 2. The SQLite file at `~/.agent_bus.db` is the shared medium — both Claude processes see it automatically.
+Restart Claude. Done. Every Claude session on your machine now shares a bus at `~/.agent_bus.db`.
 
 ---
 
-## Backends
+## Capabilities
 
-### Option 1 — Local SQLite (default, zero config)
+Seven tools across two communication patterns.
 
-The simplest setup. State lives in `~/.agent_bus.db`. Every agent on the same machine shares it automatically.
+### Pattern 1 — Point-to-point sync
 
-```bash
-uvx agent2agent           # run the MCP server
-# or
-pip install agent2agent
+One agent produces a result. Another blocks until it's ready.
+
+| Tool | What it does |
+|------|-------------|
+| `agent_start(name, task)` | Announce you're running so others can see you in status |
+| `agent_publish(name, result)` | Post your result — any agent waiting on you unblocks instantly |
+| `agent_wait(name, timeout)` | Block until the named agent publishes, then return its result |
+| `agent_status()` | List all agents, their tasks, and whether they've finished |
+| `agent_clear(name)` | Delete a slot so the name can be reused |
+
+**Example — researcher feeds writer:**
+
+```
+# Session A (researcher)
+agent_start(name="researcher", task="finding competitors")
+... do research ...
+agent_publish(name="researcher", result="Competitor list: ...")
+
+# Session B (writer) — can start before or after A
+agent_wait(name="researcher")   ← blocks here until A publishes
+... write the report using the result ...
 ```
 
-Add to `~/.claude/settings.json`:
+**Example — fan-in: wait for multiple agents:**
 
+```
+# Session C (orchestrator) — waits for both to finish
+result_a = agent_wait(name="agent-a")
+result_b = agent_wait(name="agent-b")
+... combine both results ...
+```
+
+Latency: ~250ms average (polls every 500ms on SQLite, instant on Postgres).
+
+---
+
+### Pattern 2 — Broadcast channels
+
+Any agent sends to a named channel. Every agent that reads that channel gets every message — messages are not consumed on read, so multiple readers each get their own copy.
+
+| Tool | What it does |
+|------|-------------|
+| `agent_send(channel, message, sender)` | Post a message to a channel |
+| `agent_recv(channel, since_id)` | Fetch all new messages since your last check |
+
+**Example — status updates all agents can see:**
+
+```
+# Any agent — announce progress
+agent_send(channel="global", message="I finished the scraping step", sender="scraper")
+
+# Any other agent — check what's happening
+agent_recv(channel="global", since_id=0)
+# → returns all messages on the channel
+
+# Next check — only get new ones
+agent_recv(channel="global", since_id=42)   # 42 = last id you saw
+```
+
+**Example — asking a specific agent a question:**
+
+```
+# Session A — ask
+agent_send(channel="main-to-sheriff", message="What did you find?", sender="main")
+
+# Session B (sheriff) — check and reply
+agent_recv(channel="main-to-sheriff", since_id=0)
+agent_send(channel="sheriff-to-main", message="Found 3 issues: ...", sender="sheriff")
+
+# Session A — receive answer
+agent_recv(channel="sheriff-to-main", since_id=0)
+```
+
+---
+
+## When to use which pattern
+
+| Situation | Use |
+|-----------|-----|
+| Agent B needs Agent A's output before it can start | `publish` / `wait` |
+| You want to see what all agents are doing | `status` |
+| One agent wants to message another without knowing if it's ready | `send` / `recv` |
+| Broadcast an update to all running agents | `send` to `"global"` channel |
+| Two agents having a back-and-forth | `send` / `recv` on named channels |
+
+---
+
+## Remote agents (shared backend)
+
+By default state lives at `~/.agent_bus.db` — local only. To connect agents across machines, point at a shared backend:
+
+**Shared Postgres** (any agent with DB credentials can participate):
 ```json
 {
   "mcpServers": {
     "agent2agent": {
-      "command": "uvx",
-      "args": ["agent2agent"]
-    }
-  }
-}
-```
-
-Override the DB path with an env var:
-
-```json
-{
-  "mcpServers": {
-    "agent2agent": {
-      "command": "uvx",
-      "args": ["agent2agent"],
-      "env": { "AGENT_BUS_DB": "/shared/volume/agents.db" }
-    }
-  }
-}
-```
-
-### Option 2 — Postgres (remote, push-based)
-
-Point `AGENT_BUS_DB` at a Postgres connection string. All agents on any machine with DB credentials become peers. Uses `LISTEN`/`NOTIFY` internally — `agent_wait` wakes up **instantly** when another agent publishes, with near-zero latency instead of the 500ms poll cycle.
-
-```bash
-pip install "agent2agent[postgres]"
-```
-
-```json
-{
-  "mcpServers": {
-    "agent2agent": {
-      "command": "uvx",
-      "args": ["agent2agent[postgres]"],
+      "command": "agent2agent",
       "env": { "AGENT_BUS_DB": "postgresql://user:pass@host/agents" }
     }
   }
 }
 ```
+Install Postgres support: `pip install "agent2agent[postgres]"`
 
-The schema is one table — easy to self-host on any Postgres instance (Supabase, Railway, your own VPS).
+Postgres uses `LISTEN`/`NOTIFY` — `agent_wait` wakes up instantly instead of polling.
 
-### Option 3 — Email (async, across any network)
-
-For agents that don't share a filesystem or database, email works as a transport. An agent publishes by sending an email; the waiting agent polls its inbox. Latency is seconds rather than milliseconds, but it requires no shared infrastructure — just two email addresses.
-
-Good for long-running async workflows (overnight runs, remote cloud agents, cross-org handoffs) where sub-second latency doesn't matter. Email backend is not yet built into this package; contributions welcome.
-
----
-
-## Usage pattern
-
-**Agent A** (producer):
-
-```
-agent_start(name="scraper", task="scraping product pages")
-... do work ...
-agent_publish(name="scraper", result=json.dumps({"products": [...]}))
-```
-
-**Agent B** (consumer, depends on A):
-
-```
-data = agent_wait(name="scraper")   # returns immediately if A already finished
-... use data["result"] ...
-agent_publish(name="summarizer", result="Done: 42 products found")
-```
-
-**You** (observer):
-
-```
-agent_status()   # shows all agents, tasks, and current state
+**Shared file path** (agents on the same network volume):
+```json
+{
+  "env": { "AGENT_BUS_DB": "/Volumes/shared/agents.db" }
+}
 ```
 
 ---
 
-## Data model
+## vs. Google's A2A protocol
 
-One table, five columns:
+Google's [A2A](https://google.github.io/A2A/) solves remote service discovery over HTTP — agents as hosted microservices calling each other via JSON-RPC. Right tool for cross-org, cross-vendor agent coordination.
 
-```sql
-CREATE TABLE agents (
-    name        TEXT PRIMARY KEY,
-    task        TEXT,
-    result      TEXT,
-    published   INTEGER,   -- unix timestamp; NULL = still running
-    started_at  INTEGER NOT NULL
-)
-```
+agent2agent solves the local parallel problem A2A doesn't cover: multiple Claude sessions already running on the same machine (or sharing a backend) that need to hand off results and stay in sync.
 
-Default DB path: `~/.agent_bus.db`. Override with `AGENT_BUS_DB=/path/to/file.db`.
-
-Communication latency: ~250ms average on SQLite (polls every 500ms), near-zero on Postgres (push via `LISTEN`/`NOTIFY`).
+| | agent2agent | Google A2A |
+|--|-------------|------------|
+| Model | Shared state (publish/wait + channels) | RPC (request/response) |
+| Transport | SQLite or Postgres | HTTPS + JSON-RPC |
+| Setup | One line in settings.json | Run agent servers + service discovery |
+| Blocking wait | `agent_wait()` ✓ | Async callbacks only |
+| Broadcast | `agent_send/recv` ✓ | ✗ |
+| Works offline | ✓ | ✗ |
+| Decentralized | ✓ no broker | ✗ needs agent card registry |
 
 ---
 
 ## Open problems
 
-- **Fan-out**: `agent_wait` blocks on a single producer. `agent_wait_all(names=[...])` that unblocks when all named agents finish would be useful.
-- **Pub/sub**: each name is a single slot — multiple consumers for the same result (broadcast) isn't supported.
-- **Expiry**: records accumulate indefinitely. A TTL or `agent_clear_all()` would help in long-running setups.
-- **Result streaming**: results are published atomically. No way to stream partial output from a running agent.
-- **Email backend**: async transport for agents with no shared infrastructure — not yet implemented.
-- **SQLite push**: SQLite backend still polls; filesystem-watch (kqueue/inotify) could drop SQLite latency to ~5ms.
+- **Fan-out**: `agent_wait_all(names=[...])` — unblock when all named agents finish
+- **Expiry**: records accumulate; need TTL or `agent_clear_all()`
+- **Result streaming**: results publish atomically; no partial/streaming output
+- **Email backend**: async transport for agents with no shared infrastructure
 
 ---
 

@@ -51,7 +51,51 @@ The key distinction: A2A assumes agents are **remote services**. agent2agent ass
 
 ---
 
-## Setup
+## Step-by-step: parallel Claude CLI agents
+
+The common case — you have multiple `claude` sessions open and want them to hand off results.
+
+**1. Install once, globally:**
+```bash
+pip install agent2agent
+```
+
+**2. Add to `~/.claude/settings.json`:**
+```json
+{
+  "mcpServers": {
+    "agent2agent": {
+      "command": "agent2agent"
+    }
+  }
+}
+```
+
+**3. Open two terminal panes (tmux, iTerm, whatever).**
+
+**4. In pane 1 — the producer agent:**
+```
+agent_start(name="researcher", task="scraping competitor prices")
+... do your work ...
+agent_publish(name="researcher", result="<your output here>")
+```
+
+**5. In pane 2 — the consumer agent** (can start before or after pane 1):
+```
+agent_wait(name="researcher")   ← blocks here until pane 1 publishes
+... use the result ...
+```
+
+**6. Check on both from anywhere:**
+```
+agent_status()
+```
+
+That's it. No server to start, no config beyond step 2. The SQLite file at `~/.agent_bus.db` is the shared medium — both Claude processes see it automatically.
+
+---
+
+## Backends
 
 ### Option 1 — Local SQLite (default, zero config)
 
@@ -116,7 +160,7 @@ The schema is one table — easy to self-host on any Postgres instance (Supabase
 
 For agents that don't share a filesystem or database, email works as a transport. An agent publishes by sending an email; the waiting agent polls its inbox. Latency is seconds rather than milliseconds, but it requires no shared infrastructure — just two email addresses.
 
-Good for long-running async workflows where sub-second latency doesn't matter. Email backend is not yet built into this package; contributions welcome.
+Good for long-running async workflows (overnight runs, remote cloud agents, cross-org handoffs) where sub-second latency doesn't matter. Email backend is not yet built into this package; contributions welcome.
 
 ---
 

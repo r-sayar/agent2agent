@@ -16,13 +16,14 @@ Add to `~/.claude/settings.json`:
 {
   "mcpServers": {
     "agent2agent": {
-      "command": "agent2agent"
+      "command": "uvx",
+      "args": ["agent2agent"]
     }
   }
 }
 ```
 
-Restart Claude. Done. Every Claude session on your machine now shares a bus at `~/.agent_bus.db`.
+Restart Claude. Done. `uvx` ships with Claude Code — no separate install needed. Every Claude session on your machine now shares a bus at `~/.agent_bus.db`.
 
 ---
 

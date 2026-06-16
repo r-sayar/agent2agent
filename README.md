@@ -148,6 +148,33 @@ Postgres uses `LISTEN`/`NOTIFY` — `agent_wait` wakes up instantly instead of p
 
 ---
 
+## Prompts that work
+
+You don't need to know the tool names. Just tell Claude what you want in plain English.
+
+**Setup:**
+> "Add agent2agent to my MCP config using uvx."
+
+**Reach another agent:**
+> "I want you to communicate with the agent whose session name contains 'sheriff'."
+
+**Ask another agent what it did:**
+> "Ask him about what he did."
+
+**Broadcast a status update:**
+> "Send a message to the global channel saying you finished the scraping step."
+
+**Check for messages:**
+> "Check the global channel for any new messages from other agents."
+
+**See what's running:**
+> "Show me the status of all agents on the bus."
+
+**Wait for another agent:**
+> "Wait for the researcher agent to finish, then use its output to write a summary."
+
+---
+
 ## vs. Google's A2A protocol
 
 Google's [A2A](https://google.github.io/A2A/) solves remote service discovery over HTTP — agents as hosted microservices calling each other via JSON-RPC. Right tool for cross-org, cross-vendor agent coordination.

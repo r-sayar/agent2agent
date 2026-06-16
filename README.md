@@ -1,29 +1,25 @@
-# agent-bus
+# agent2agent
 
-A tiny MCP server that lets parallel Claude agents signal completion and wait for each other — on a single machine, with no infrastructure.
+Decentralized agent-to-agent communication. Agents publish results and wait for each other — no broker, no cloud, no orchestrator required.
 
 ```
 Agent A  →  agent_publish(name="researcher", result="…")
 Agent B  →  agent_wait(name="researcher")   # blocks until A is done, then returns A's result
 ```
 
-State lives in a local SQLite file (`~/.agent_bus.db`). No Redis, no broker, no cloud service.
+Works on a single laptop out of the box. Scales to remote teams by swapping the backend.
 
 ---
 
 ## Why this exists
 
-Everyone building multi-agent systems is focused on the **cloud orchestration** problem: how do you fan out work across remote workers, managed queues, and hosted APIs? A2A, CrewAI, AutoGen — they're all solving that.
-
-Nobody is focused on the **local parallel** problem.
-
-When you run `claude --dangerously-skip-permissions` in a few terminal tabs, or use Claude Code's sub-agent spawning, you get real parallelism — multiple Claude processes running on your machine at the same time. This is increasingly the default way developers work with agents. But those agents have no way to talk to each other. If Agent B's work depends on Agent A's output, you either:
+The default way developers work with agents today is **parallel** — multiple Claude Code sessions open at once, sub-agents spawned mid-task, background jobs running alongside foreground work. But those agents have no way to talk to each other. If Agent B's work depends on Agent A's output, your options are:
 
 - Serialize everything (kills the parallelism benefit), or
 - Copy-paste results manually between sessions, or
 - Build your own ad-hoc coordination layer every time.
 
-**agent-bus** is that coordination layer, kept deliberately minimal. It's a synchronization primitive, not a framework. You get five tools:
+agent2agent is that coordination layer, kept deliberately minimal. Five tools:
 
 | Tool | What it does |
 |------|-------------|
@@ -35,64 +31,86 @@ When you run `claude --dangerously-skip-permissions` in a few terminal tabs, or 
 
 ---
 
-## Comparison with alternatives
+## vs. Google's Agent2Agent (A2A) protocol
 
-| | agent-bus | A2A | CrewAI / AutoGen | Claude Workflows |
-|--|-----------|-----|-----------------|-----------------|
-| **Target** | Local parallel agents | Remote agent-to-agent | Orchestrated multi-agent | Hosted cloud |
-| **Transport** | SQLite file | HTTP | In-process | Cloud API |
-| **Setup** | `uvx agent-bus` | Full server + certs | Python framework install | Subscription |
-| **Wait primitive** | `agent_wait()` ✓ | Async callbacks | No | No |
-| **Works offline** | ✓ | ✗ | ✓ | ✗ |
-| **Lines of code** | ~200 | — | — | — |
+Google's [A2A protocol](https://google.github.io/A2A/) solves a different problem: **how do remote agent services discover and call each other over HTTP**. It's designed for enterprise environments where agents run as separate hosted services behind auth layers.
 
-The key insight: **A2A and similar protocols assume agents are remote services**. They're designed for service discovery, auth, and async messaging over HTTP. That's the right tool when you're coordinating agents across machines or vendors. But for the common case of "I spawned three Claude tabs and they need to share results," it's massive overkill. agent-bus is a `wait()`/`notify()` for LLM agents on a laptop.
+agent2agent solves the problem A2A explicitly doesn't cover: **agents already running on the same machine (or sharing a backend) that need to hand off results**.
+
+| | agent2agent | Google A2A |
+|--|-------------|------------|
+| **Model** | Shared state (publish/wait) | RPC (request/response) |
+| **Transport** | SQLite, Postgres, or email | HTTPS + JSON-RPC |
+| **Setup** | `uvx agent2agent` | Run agent servers + service discovery |
+| **Blocking wait** | `agent_wait()` ✓ | Async callbacks only |
+| **Works offline** | ✓ | ✗ |
+| **Decentralized** | ✓ (no broker) | ✗ (requires agent card registry) |
+| **Lines of code** | ~200 | — |
+
+The key distinction: A2A assumes agents are **remote services**. agent2agent assumes agents are **parallel processes** that share a medium — whether that's a local file, a database, or a mailbox.
 
 ---
 
-## Install
+## Setup
+
+### Option 1 — Local SQLite (default, zero config)
+
+The simplest setup. State lives in `~/.agent_bus.db`. Every agent on the same machine shares it automatically.
 
 ```bash
-# Run directly with uvx (no install needed)
-uvx agent-bus
-
-# Or install
-pip install agent-bus
+uvx agent2agent           # run the MCP server
+# or
+pip install agent2agent
 ```
 
-## Add to Claude Code
-
-Add to your `~/.claude/settings.json` (or project `.claude/settings.json`):
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
-    "agent-bus": {
+    "agent2agent": {
       "command": "uvx",
-      "args": ["agent-bus"]
+      "args": ["agent2agent"]
     }
   }
 }
 ```
 
-Or if installed locally:
+Override the DB path with an env var:
 
 ```json
 {
   "mcpServers": {
-    "agent-bus": {
-      "command": "python",
-      "args": ["/path/to/agent-bus/server.py"]
+    "agent2agent": {
+      "command": "uvx",
+      "args": ["agent2agent"],
+      "env": { "AGENT_BUS_DB": "/shared/volume/agents.db" }
     }
   }
 }
 ```
+
+### Option 2 — Shared database (remote teams)
+
+Point `AGENT_BUS_DB` at a network-accessible Postgres or SQLite file. All agents on any machine connecting to the same DB become peers — no broker required, no central coordinator.
+
+```
+AGENT_BUS_DB=postgresql://user:pass@host/agents uvx agent2agent
+```
+
+Any agent that has DB credentials can publish and wait. The schema is one table — easy to self-host.
+
+### Option 3 — Email (async, across any network)
+
+For agents that don't share a filesystem or database, email works as the transport. An agent publishes by sending an email; the waiting agent polls its inbox. Latency is seconds rather than milliseconds, but it works across any two machines with no shared infrastructure.
+
+This pairs with [openclaw-email-bridge](../openclaw/) — wire an agent's outbox to an email address and any agent can `agent_wait` on a named inbox. Good for long-running async workflows where tight latency doesn't matter.
 
 ---
 
 ## Usage pattern
 
-**Agent A** (runs first, produces a result):
+**Agent A** (producer):
 
 ```
 agent_start(name="scraper", task="scraping product pages")
@@ -100,7 +118,7 @@ agent_start(name="scraper", task="scraping product pages")
 agent_publish(name="scraper", result=json.dumps({"products": [...]}))
 ```
 
-**Agent B** (depends on A's output):
+**Agent B** (consumer, depends on A):
 
 ```
 data = agent_wait(name="scraper")   # returns immediately if A already finished
@@ -108,17 +126,17 @@ data = agent_wait(name="scraper")   # returns immediately if A already finished
 agent_publish(name="summarizer", result="Done: 42 products found")
 ```
 
-**You** (watching from the outside):
+**You** (observer):
 
 ```
-agent_status()   # shows both agents, their tasks, and current state
+agent_status()   # shows all agents, tasks, and current state
 ```
 
 ---
 
 ## Data model
 
-One SQLite table, five columns:
+One table, five columns:
 
 ```sql
 CREATE TABLE agents (
@@ -132,14 +150,17 @@ CREATE TABLE agents (
 
 Default DB path: `~/.agent_bus.db`. Override with `AGENT_BUS_DB=/path/to/file.db`.
 
+Communication latency: ~250ms average (polls every 500ms). Switch to a shared in-memory server for sub-millisecond wakeups.
+
 ---
 
 ## Open problems
 
-- **Fan-out**: `agent_wait` blocks on a single producer. A `agent_wait_all(names=[...])` that unblocks when all named agents finish would be useful.
-- **Pub/sub channels**: right now each name is a single slot. Multiple consumers for the same result (broadcast) isn't supported.
+- **Fan-out**: `agent_wait` blocks on a single producer. `agent_wait_all(names=[...])` that unblocks when all named agents finish would be useful.
+- **Pub/sub**: each name is a single slot — multiple consumers for the same result (broadcast) isn't supported.
 - **Expiry**: records accumulate indefinitely. A TTL or `agent_clear_all()` would help in long-running setups.
-- **Result streaming**: results are published atomically. There's no way to stream partial output from a running agent.
+- **Result streaming**: results are published atomically. No way to stream partial output from a running agent.
+- **Push notifications**: currently poll-based. A shared SSE server would drop latency to near-zero.
 
 ---
 

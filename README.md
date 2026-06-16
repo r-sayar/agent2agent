@@ -90,21 +90,33 @@ Override the DB path with an env var:
 }
 ```
 
-### Option 2 — Shared database (remote teams)
+### Option 2 — Postgres (remote, push-based)
 
-Point `AGENT_BUS_DB` at a network-accessible Postgres or SQLite file. All agents on any machine connecting to the same DB become peers — no broker required, no central coordinator.
+Point `AGENT_BUS_DB` at a Postgres connection string. All agents on any machine with DB credentials become peers. Uses `LISTEN`/`NOTIFY` internally — `agent_wait` wakes up **instantly** when another agent publishes, with near-zero latency instead of the 500ms poll cycle.
 
+```bash
+pip install "agent2agent[postgres]"
 ```
-AGENT_BUS_DB=postgresql://user:pass@host/agents uvx agent2agent
+
+```json
+{
+  "mcpServers": {
+    "agent2agent": {
+      "command": "uvx",
+      "args": ["agent2agent[postgres]"],
+      "env": { "AGENT_BUS_DB": "postgresql://user:pass@host/agents" }
+    }
+  }
+}
 ```
 
-Any agent that has DB credentials can publish and wait. The schema is one table — easy to self-host.
+The schema is one table — easy to self-host on any Postgres instance (Supabase, Railway, your own VPS).
 
 ### Option 3 — Email (async, across any network)
 
-For agents that don't share a filesystem or database, email works as the transport. An agent publishes by sending an email; the waiting agent polls its inbox. Latency is seconds rather than milliseconds, but it works across any two machines with no shared infrastructure.
+For agents that don't share a filesystem or database, email works as a transport. An agent publishes by sending an email; the waiting agent polls its inbox. Latency is seconds rather than milliseconds, but it requires no shared infrastructure — just two email addresses.
 
-This pairs with [openclaw-email-bridge](../openclaw/) — wire an agent's outbox to an email address and any agent can `agent_wait` on a named inbox. Good for long-running async workflows where tight latency doesn't matter.
+Good for long-running async workflows where sub-second latency doesn't matter. Email backend is not yet built into this package; contributions welcome.
 
 ---
 
@@ -150,7 +162,7 @@ CREATE TABLE agents (
 
 Default DB path: `~/.agent_bus.db`. Override with `AGENT_BUS_DB=/path/to/file.db`.
 
-Communication latency: ~250ms average (polls every 500ms). Switch to a shared in-memory server for sub-millisecond wakeups.
+Communication latency: ~250ms average on SQLite (polls every 500ms), near-zero on Postgres (push via `LISTEN`/`NOTIFY`).
 
 ---
 
@@ -160,7 +172,8 @@ Communication latency: ~250ms average (polls every 500ms). Switch to a shared in
 - **Pub/sub**: each name is a single slot — multiple consumers for the same result (broadcast) isn't supported.
 - **Expiry**: records accumulate indefinitely. A TTL or `agent_clear_all()` would help in long-running setups.
 - **Result streaming**: results are published atomically. No way to stream partial output from a running agent.
-- **Push notifications**: currently poll-based. A shared SSE server would drop latency to near-zero.
+- **Email backend**: async transport for agents with no shared infrastructure — not yet implemented.
+- **SQLite push**: SQLite backend still polls; filesystem-watch (kqueue/inotify) could drop SQLite latency to ~5ms.
 
 ---
 
